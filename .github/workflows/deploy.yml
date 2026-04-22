@@ -1,0 +1,70 @@
+name: Deploy Retail
+
+on:
+  push:
+    branches:
+      - test
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Git branch to deploy
+        required: true
+        default: test
+      run_migrate:
+        description: Run bench migrate before restart
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retail-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      APP_NAME: retail
+      DEPLOY_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}
+      RUN_MIGRATE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_migrate || 'true' }}
+    steps:
+      - name: Deploy app over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          port: ${{ secrets.PROD_PORT }}
+          script_stop: true
+          envs: APP_NAME,DEPLOY_BRANCH,RUN_MIGRATE
+          script: |
+            set -euxo pipefail
+
+            BENCH_PATH="${{ secrets.BENCH_PATH }}"
+            SITE_NAME="${{ secrets.SITE_NAME }}"
+            APP_PATH="$BENCH_PATH/apps/$APP_NAME"
+
+            test -d "$BENCH_PATH"
+            test -d "$APP_PATH"
+
+            cd "$APP_PATH"
+            git fetch origin
+            git checkout "$DEPLOY_BRANCH"
+            git pull --ff-only origin "$DEPLOY_BRANCH"
+
+            cd "$BENCH_PATH"
+
+            if [ "$RUN_MIGRATE" = "true" ]; then
+              bench --site "$SITE_NAME" backup --with-files
+              bench --site "$SITE_NAME" migrate
+            fi
+
+            bench build --app "$APP_NAME"
+            bench clear-cache
+            bench restart || true
+
+            echo "Deploy complete: $APP_NAME@$DEPLOY_BRANCH"
